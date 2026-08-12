@@ -3,19 +3,19 @@
 	"displayName": "Fast Remote - SSH",
 	"description": "A performance- and reliability-focused Open Remote SSH distribution for VSCodium and Code OSS.",
 	"version": "0.4.0",
+	"author": {
+		"name": "F1yingWhite",
+		"url": "https://github.com/F1yingWhite"
+	},
 	"publisher": "F1yingWhite",
 	"license": "MIT",
+	"homepage": "https://github.com/F1yingWhite/fast-remote-ssh#readme",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/F1yingWhite/fast-remote-ssh.git"
 	},
 	"bugs": {
 		"url": "https://github.com/F1yingWhite/fast-remote-ssh/issues"
-	},
-	"homepage": "https://github.com/F1yingWhite/fast-remote-ssh#readme",
-	"author": {
-		"name": "F1yingWhite",
-		"url": "https://github.com/F1yingWhite"
 	},
 	"engines": {
 		"vscode": "^1.70.2"
