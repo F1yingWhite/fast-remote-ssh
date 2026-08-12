@@ -52,6 +52,8 @@ const SSH_CONFIG_PROPERTIES: Record<string, string> = {
     'preferredauthentications': 'PreferredAuthentications',
     'proxyjump': 'ProxyJump',
     'proxycommand': 'ProxyCommand',
+    'serveraliveinterval': 'ServerAliveInterval',
+    'serveralivecountmax': 'ServerAliveCountMax',
     'include': 'Include',
 };
 

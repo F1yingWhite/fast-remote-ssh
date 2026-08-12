@@ -62,7 +62,7 @@ body:
       value: |-
         # User Acknowledgements
         > [!TIP]
-        > Use these links to review the existing [Issues](https://github.com/jeanp413/open-remote-ssh/issues?q=sort%3Areactions-desc).
+        > Use these links to review the existing [Issues](https://github.com/F1yingWhite/fast-remote-ssh/issues?q=sort%3Areactions-desc).
 
   - type: checkboxes
     attributes:
@@ -82,4 +82,3 @@ body:
       description: Please note that Open Source projects are maintained by volunteers, where your cases might not be always relevant to the others. It would make things move faster if you could help investigate and propose solutions.
       options:
         - label: I am willing to submit a PR to fix this issue
-

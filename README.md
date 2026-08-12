@@ -1,6 +1,32 @@
-# Open Remote - SSH
+# Fast Remote - SSH
 
-![Open Remote SSH](https://raw.githubusercontent.com/jeanp413/open-remote-ssh/master/docs/images/open-remote-ssh.gif)
+![Open Remote SSH](docs/images/open-remote-ssh.gif)
+
+An independently maintained, performance- and reliability-focused distribution of
+[Open Remote - SSH](https://github.com/jeanp413/open-remote-ssh) for VSCodium and Code OSS.
+It keeps the familiar `remote.SSH.*` settings and `ssh-remote` authority while improving
+connection reuse, recovery, forwarding, authentication, and diagnostics.
+
+> [!IMPORTANT]
+> Disable or uninstall `jeanp413.open-remote-ssh` before enabling this extension.
+> Both extensions provide the same `ssh-remote` authority, commands, views, and settings,
+> so they are not designed to run at the same time.
+
+## Performance and reliability changes
+
+- Reuses the remote server endpoint and connection token across windows.
+- Probes cached endpoints and automatically falls back when a cache entry is stale.
+- Recovers an already-running remote server without rerunning the full installation script.
+- Tries public-key authentication directly while retaining compatibility fallbacks.
+- Sends the Remote Extension Host channel through direct SSH forwarding.
+- Lets the operating system allocate local forwarding ports to avoid port races.
+- Enables TCP `NODELAY` and configurable encrypted SSH keepalives.
+- Serializes concurrent remote server setup and improves cleanup during reconnects.
+- Adds per-stage performance logs for connection diagnosis.
+
+The optimization primarily reduces connection and reconnection overhead. Once connected,
+file operations still run through the VSCodium remote server protocol and remain bounded by
+network latency, remote storage, and server-side work.
 
 ## SSH Host Requirements
 You can connect to a running SSH server on the following platforms.
@@ -20,28 +46,29 @@ You can connect to a running SSH server on the following platforms.
 
 **Configuration**
 
-You SSH server's configuration needs to have the following setting:
+Your SSH server's configuration needs to have the following setting:
 - `AllowTcpForwarding yes`
 
 **Activation**
 
-> NOTE: Not needed in VSCodium since version 1.75
-
-Enable the extension in your `argv.json`
-
+Most current VSCodium builds activate the required API proposals automatically. If the
+Remote view is unavailable or the extension log says that `resolvers` or
+`contribViewsRemote` cannot be used, enable this extension explicitly in `argv.json`.
+Restart VSCodium after changing the file.
 
 ```json
 {
     ...
     "enable-proposed-api": [
         ...,
-        "jeanp413.open-remote-ssh",
+        "F1yingWhite.fast-remote-ssh",
     ]
     ...
 }
 ```
-which you can open by running the `Preferences: Configure Runtime Arguments` command.
-The file is located in `~/.vscode-oss/argv.json`.
+
+Open the file with the `Preferences: Configure Runtime Arguments` command. It is usually
+located at `~/.vscode-oss/argv.json`.
 
 **Alpine linux**
 

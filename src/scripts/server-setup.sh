@@ -1,6 +1,6 @@
 # Server installation script
 
-TMP_DIR="${XDG_RUNTIME_DIR:-"/tmp"}"
+TMP_DIR=
 
 DISTRO_VERSION="%%DISTRO_VERSION%%"
 DISTRO_COMMIT="%%DISTRO_COMMIT%%"
@@ -9,7 +9,8 @@ DISTRO_VSCODIUM_RELEASE="%%DISTRO_VSCODIUM_RELEASE%%"
 
 SERVER_APP_NAME="%%SERVER_APP_NAME%%"
 SERVER_INITIAL_EXTENSIONS="%%SERVER_INITIAL_EXTENSIONS%%"
-SERVER_LISTEN_FLAG="%%SERVER_LISTEN_FLAG%%"
+SERVER_INITIAL_EXTENSION_IDS=(%%SERVER_INITIAL_EXTENSION_IDS%%)
+SERVER_LISTEN_FLAG=
 SERVER_DATA_DIR="%%SERVER_DATA_DIR%%"
 SERVER_DATA_DIR_FLAG="%%SERVER_DATA_DIR_FLAG%%"
 SERVER_DIR="$SERVER_DATA_DIR/bin/$DISTRO_COMMIT"
@@ -26,6 +27,32 @@ LISTENING_ON=
 OS_RELEASE_ID=
 ARCH=
 PLATFORM=
+LOCKDIR_HELD=false
+
+select_tmp_dir() {
+  if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -w "$XDG_RUNTIME_DIR" && -x "$XDG_RUNTIME_DIR" ]]; then
+    TMP_DIR="$XDG_RUNTIME_DIR"
+    return 0
+  fi
+
+  if [[ -d /tmp && -w /tmp && -x /tmp ]]; then
+    if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+      echo "Warning: XDG_RUNTIME_DIR is not a usable directory; falling back to /tmp" >&2
+    fi
+    TMP_DIR=/tmp
+    return 0
+  fi
+
+  return 1
+}
+
+release_install_lock() {
+  if [[ "$LOCKDIR_HELD" == "true" ]]; then
+    rm -f "$LOCKDIR/pid" 2>/dev/null || true
+    rmdir "$LOCKDIR" 2>/dev/null || true
+    LOCKDIR_HELD=false
+  fi
+}
 
 # Mimic output from logs of remote-ssh extension
 print_install_results_and_exit() {
@@ -40,16 +67,33 @@ print_install_results_and_exit() {
   echo "tmpDir==$TMP_DIR=="
 %%ENV_VAR_LINES%%
   echo "%%SCRIPT_ID%%: end"
+  release_install_lock
   exit 0
 }
 
-LOCKFILE="$TMP_DIR/server_install.lock"
+if ! select_tmp_dir; then
+  echo "Error: neither XDG_RUNTIME_DIR nor /tmp is a usable temporary directory" >&2
+  print_install_results_and_exit 1
+fi
+
+# The remote server and shells spawned by it must not inherit a stale runtime
+# directory. This also prevents tools such as fnm from creating IPC links in a
+# path that does not exist.
+export XDG_RUNTIME_DIR="$TMP_DIR"
+
+SERVER_LISTEN_FLAG="%%SERVER_LISTEN_FLAG%%"
+
+LOCKFILE="$TMP_DIR/open-remote-ssh-server-install-$USER.lock"
+LOCKDIR="$LOCKFILE.d"
 
 if command -v flock >/dev/null 2>&1; then
   # Automatic file descriptor allocation ({FD}) requires bash >= 4.1,
   # and macOS still ships bash 3.2, so use a fixed descriptor instead.
   FD=9
-  exec 9<>"$LOCKFILE"
+  if ! { exec 9<>"$LOCKFILE"; }; then
+    echo "Warning: cannot open the server install lock" >&2
+    print_install_results_and_exit 1
+  fi
 
   if flock --help 2>&1 | grep -q -- '-w'; then
     # wait 30s to acquire lock, otherwise fail
@@ -73,9 +117,37 @@ if command -v flock >/dev/null 2>&1; then
     fi
   fi
 
-  trap "flock -u $FD; trap - EXIT INT HUP; exit" EXIT INT HUP
+  trap 'flock -u 9; trap - EXIT INT HUP; exit' EXIT INT HUP
 else
-  echo "Warning: flock not available, skipping install lock"
+  ELAPSED=0
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do
+    LOCK_OWNER="$(cat "$LOCKDIR/pid" 2>/dev/null)"
+    if [[ $LOCK_OWNER =~ ^[0-9]+$ ]] && ! kill -0 "$LOCK_OWNER" 2>/dev/null; then
+      rm -f "$LOCKDIR/pid" 2>/dev/null || true
+      rmdir "$LOCKDIR" 2>/dev/null || true
+      continue
+    fi
+    # A process can die between mkdir and writing its pid. Give a live owner a
+    # brief grace period, then reclaim an empty or corrupt lock directory.
+    if [[ $ELAPSED -ge 10 ]] && ! [[ $LOCK_OWNER =~ ^[0-9]+$ ]]; then
+      rm -f "$LOCKDIR/pid" 2>/dev/null || true
+      rmdir "$LOCKDIR" 2>/dev/null || true
+      continue
+    fi
+    if [[ $ELAPSED -ge 300 ]]; then
+      echo "Warning: cannot acquire the portable install lock"
+      print_install_results_and_exit 1
+    fi
+    sleep 0.1
+    ELAPSED=$((ELAPSED + 1))
+  done
+  LOCKDIR_HELD=true
+  if ! echo $$ > "$LOCKDIR/pid"; then
+    release_install_lock
+    echo "Warning: cannot record the portable install lock owner"
+    print_install_results_and_exit 1
+  fi
+  trap 'release_install_lock; trap - EXIT INT HUP; exit' EXIT INT HUP
 fi
 
 # Check if platform is supported
@@ -238,7 +310,28 @@ else
   SERVER_RUNNING_PROCESS="$(ps -o pid,args -A | grep $SERVER_SCRIPT | grep -v grep)"
 fi
 
-if [[ -z $SERVER_RUNNING_PROCESS ]]; then
+if [[ -n $SERVER_RUNNING_PROCESS ]]; then
+  echo "Server script is already running $SERVER_SCRIPT"
+
+  # --install-extension is only applied by --start-server when a new server
+  # process is launched. Apply the requested defaults explicitly when reusing
+  # an existing process so a changed defaultExtensions setting is not skipped.
+  if (( ${#SERVER_INITIAL_EXTENSION_IDS[@]} > 0 )); then
+    SERVER_EXTENSION_ARGUMENTS=()
+    if [[ -n $SERVER_DATA_DIR_FLAG ]]; then
+      SERVER_EXTENSION_ARGUMENTS+=(--server-data-dir="$SERVER_DATA_DIR")
+    fi
+    for EXTENSION_ID in "${SERVER_INITIAL_EXTENSION_IDS[@]}"; do
+      SERVER_EXTENSION_ARGUMENTS+=(--install-extension "$EXTENSION_ID")
+    done
+
+    "$SERVER_SCRIPT" "${SERVER_EXTENSION_ARGUMENTS[@]}" --accept-server-license-terms
+    if (( $? > 0 )); then
+      echo "Error installing default extensions"
+      print_install_results_and_exit 1
+    fi
+  fi
+else
   if [[ -f $SERVER_LOGFILE ]]; then
     rm $SERVER_LOGFILE
   fi
@@ -253,8 +346,6 @@ if [[ -z $SERVER_RUNNING_PROCESS ]]; then
 
   $SERVER_SCRIPT --start-server --host=127.0.0.1 $SERVER_LISTEN_FLAG $SERVER_DATA_DIR_FLAG $SERVER_VALIDATION_FLAG $SERVER_INITIAL_EXTENSIONS --connection-token-file $SERVER_TOKENFILE --telemetry-level off --enable-remote-auto-shutdown --accept-server-license-terms &> $SERVER_LOGFILE &
   echo $! > $SERVER_PIDFILE
-else
-  echo "Server script is already running $SERVER_SCRIPT"
 fi
 
 if [[ -f $SERVER_TOKENFILE ]]; then

@@ -113,7 +113,6 @@ it('forwards the agent through a socket that stays alive', async () => {
     port: hostPort,
     username: USERNAME,
     password: PASSWORD,
-    reconnect: false,
     readyTimeout: 10_000,
     strictVendor: false,
   });

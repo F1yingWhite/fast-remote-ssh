@@ -40,7 +40,7 @@ Tip: also search for [closed issues]; your issue might have already been fixed!
 
 If your issue hasn't been reported already, open a new issue and make sure to fill in the template **completely**. They are vital for maintainers to figure out important details about your setup.
 
-[closed issues]: https://github.com/jeanp413/open-remote-ssh/issues?q=is%3Aissue%20state%3Aclosed
+[closed issues]: https://github.com/F1yingWhite/fast-remote-ssh/issues?q=is%3Aissue%20state%3Aclosed
 
 ## I have an idea for a feature
 

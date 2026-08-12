@@ -10,7 +10,6 @@ export async function waitForSSHReady(username: string, password: string, port: 
             port,
             username,
             password,
-            reconnect: false,
             readyTimeout: 10000,
             strictVendor: false,
         });

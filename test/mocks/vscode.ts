@@ -15,9 +15,21 @@ const env = {
 
 class ExtensionContext {
     extensionPath = '/data/vscodium/extensions/open-remote-ssh';
+    private state = new Map<string, unknown>();
+    globalState = {
+        get: <T>(key: string): T | undefined => this.state.get(key) as T | undefined,
+        update: async (key: string, value: unknown) => {
+            if (value === undefined) {
+                this.state.delete(key);
+            } else {
+                this.state.set(key, value);
+            }
+        },
+    };
     environmentVariableCollection = {
         persistent: false,
         replace: vi.fn(),
+        delete: vi.fn(),
     };
 }
 

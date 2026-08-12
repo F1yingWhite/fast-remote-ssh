@@ -6,16 +6,12 @@ on:
     tags:
       - v*
 
-env:
-  PUBLISH_OPENVSX: ${{ vars.PUBLISH_OPENVSX }}
-  PUBLISH_VSCODE: ${{ vars.PUBLISH_VSCODE }}
-
 permissions:
   contents: write   # Release
 
 jobs:
   publish:
-    if: github.repository == 'jeanp413/open-remote-ssh'
+    if: github.repository == 'F1yingWhite/fast-remote-ssh'
     runs-on: ubuntu-latest
     environment: publish
     steps:
@@ -27,16 +23,20 @@ jobs:
 
       - name: Get Version
         run: |
-          # Get the latest tag
-          LATEST_TAG=$(git tag | tr - \~ | sort -rV | tr \~ - | head -n1)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="v$(node -p "require('./package.json').version")"
+          fi
 
-          if [ -z "$LATEST_TAG" ]; then
-            echo "No tags found in the repository"
+          PACKAGE_VERSION="v$(node -p "require('./package.json').version")"
+          if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "Tag $VERSION does not match package version $PACKAGE_VERSION"
             exit 1
           fi
 
-          echo "VERSION=$LATEST_TAG" >> $GITHUB_ENV
-          echo "Using version: $LATEST_TAG"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Using version: $VERSION"
 
       - name: Check Existing Release
         run: |
@@ -128,7 +128,7 @@ jobs:
             ```
 
       - name: Publish to Open VSX Registry
-        if: env.PUBLISH_OPENVSX == 'yes'
+        if: vars.PUBLISH_OPENVSX == 'yes'
         uses: HaaLeo/publish-vscode-extension@ca5561daa085dee804bf9f37fe0165785a9b14db # v2.0.0
         with:
           extensionFile: ${{ env.VSIX_NAME }}

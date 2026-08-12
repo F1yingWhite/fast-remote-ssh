@@ -1,3 +1,17 @@
+## 0.4.0
+
+- Add cross-window remote server endpoint and token caching with bounded health probes.
+- Add fast recovery for already-running remote servers.
+- Use direct forwarding for the Remote Extension Host connection and remove the unused SOCKS path.
+- Let the operating system allocate local tunnel ports and enable TCP `NODELAY`.
+- Add configurable SSH keepalives to prevent idle disconnects.
+- Reduce public-key authentication round trips while preserving compatibility fallbacks.
+- Serialize remote installation and startup across concurrent windows on Linux, macOS, and Windows.
+- Fall back from an unusable `XDG_RUNTIME_DIR` and pass the corrected directory to the remote server.
+- Harden tunnel, resolver, cache, shutdown, and Windows setup lifecycle handling.
+- Add connection-stage performance logging and focused regression tests.
+- Publish as the independently maintained `F1yingWhite.fast-remote-ssh` distribution.
+
 ## 0.3.1
 
 - fix(windows): use improved command to test archive (#331)

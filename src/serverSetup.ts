@@ -1,8 +1,9 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as zlib from 'zlib';
 import { Log } from './common/logger';
-import { getVSCodeServerConfig, ServerVersion, ServerValidation } from './serverConfig';
+import { IServerConfig, ServerVersion, ServerValidation } from './serverConfig';
 import SSHConnection from './ssh/sshConnection';
 import { fetchRelease, IRelease } from './fetchRelease';
 import { sanitizeExtensionIds } from './utils/sanitize-extension-ids';
@@ -102,26 +103,149 @@ export type ServerInstallResult = {
     [key: string]: unknown;
 };
 
+export type InstallCodeServerOptions = {
+    serverConfig: IServerConfig;
+    serverDownloadUrlTemplate: string | undefined;
+    serverVersion: ServerVersion;
+    extensionIds: string[];
+    envVariables: string[];
+    platform: string | undefined;
+    useSocketPath: boolean;
+    customInstallPath: string | undefined;
+    extensionPath: string;
+};
+
+/**
+ * Extension identifiers are case-insensitive. Normalizing them keeps both the
+ * cache fingerprint and generated install command stable when users only
+ * reorder entries, vary casing, or repeat an id.
+ */
+export function normalizeExtensionIds(extensionIds: string[]): string[] {
+    return [...new Set(sanitizeExtensionIds(extensionIds).map(extensionId => extensionId.toLowerCase()))].sort();
+}
+
+/**
+ * The lightweight recovery probe can only prove that a process for the exact
+ * local commit is alive. Fall back to the full setup whenever there are extra
+ * requirements that the probe cannot verify or apply.
+ */
+export function canAttemptFastServerReuse(options: InstallCodeServerOptions): boolean {
+    return options.serverVersion === 'match'
+        && options.serverConfig.serverValidation === 'strict'
+        && !options.useSocketPath
+        && normalizeExtensionIds(options.extensionIds).length === 0
+        && options.envVariables.length === 0;
+}
+
 export class ServerInstallError extends Error {
     constructor(message: string) {
         super(message);
     }
 }
 
+function shellSingleQuote(value: string): string {
+    return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+/**
+ * Reuse an already-running remote extension host without replaying the full
+ * install script. The normal path performs platform detection, locking,
+ * download checks and process discovery on every connection. None of that is
+ * needed when the exact-commit server is alive and its token/log are intact.
+ */
+async function tryReuseCodeServer(
+    conn: SSHConnection,
+    installOptions: Pick<ServerInstallOptions, 'id' | 'commit' | 'serverApplicationName' | 'serverDataFolderName' | 'customInstallPath'>,
+    platform: string | undefined,
+    logger: Log
+): Promise<ServerInstallResult | undefined> {
+    if (!platform || platform === 'windows') {
+        return undefined;
+    }
+
+    const serverDataDir = installOptions.customInstallPath
+        ? installOptions.customInstallPath.replace(/^~(?=\/|$)/, '$HOME')
+        : `$HOME/${installOptions.serverDataFolderName}`;
+    const marker = `open-remote-ssh-fast-${installOptions.id}`;
+    const script = [
+        `data_dir=${shellSingleQuote(serverDataDir)}`,
+        // Expand a leading $HOME only after the value has been safely assigned.
+        'data_dir="${data_dir/#\\$HOME/$HOME}"',
+        `commit=${shellSingleQuote(installOptions.commit)}`,
+        `server_name=${shellSingleQuote(installOptions.serverApplicationName)}`,
+        'server_script="$data_dir/bin/$commit/bin/$server_name"',
+        'pid_file="$data_dir/.$commit.pid"',
+        'token_file="$data_dir/.$commit.token"',
+        'log_file="$data_dir/.$commit.log"',
+        '[ -x "$server_script" ] && [ -s "$pid_file" ] && [ -s "$token_file" ] && [ -s "$log_file" ] || exit 20',
+        'pid="$(cat "$pid_file")"',
+        'kill -0 "$pid" 2>/dev/null || exit 21',
+        'ps -p "$pid" -o command= 2>/dev/null | grep -F -- "$server_script" >/dev/null || exit 22',
+        'listening="$(sed -n "s/^Extension host agent listening on //p" "$log_file" | tail -n 1)"',
+        '[ -n "$listening" ] || exit 23',
+        'tmp_dir="${XDG_RUNTIME_DIR:-}"',
+        '[ -n "$tmp_dir" ] && [ -d "$tmp_dir" ] && [ -w "$tmp_dir" ] && [ -x "$tmp_dir" ] || tmp_dir=/tmp',
+        '[ -d "$tmp_dir" ] && [ -w "$tmp_dir" ] && [ -x "$tmp_dir" ] || exit 24',
+        `printf '%s\\n' ${shellSingleQuote(`${marker}: start`)}`,
+        'printf "exitCode==0==\\n"',
+        'printf "listeningOn==%s==\\n" "$listening"',
+        'printf "connectionToken==%s==\\n" "$(cat "$token_file")"',
+        'printf "logFile==%s==\\n" "$log_file"',
+        `printf "platform==%s==\\n" ${shellSingleQuote(platform || 'unknown')}`,
+        'printf "tmpDir==%s==\\n" "$tmp_dir"',
+        `printf '%s\\n' ${shellSingleQuote(`${marker}: end`)}`,
+    ].join('; ');
+
+    const started = performance.now();
+    const result = await conn.exec(`bash -c ${shellSingleQuote(script)}`);
+    if (!result.stdout) {
+        logger.trace(`Fast server reuse missed after ${Math.round(performance.now() - started)}ms`);
+        return undefined;
+    }
+
+    const resultMap = parseServerInstallOutput(result.stdout, marker);
+    if (!resultMap || resultMap.exitCode !== '0' || !/^\d+$/.test(resultMap.listeningOn) || !resultMap.connectionToken) {
+        logger.trace(`Fast server reuse missed after ${Math.round(performance.now() - started)}ms`);
+        return undefined;
+    }
+
+    if (result.stderr) {
+        // Login shells and remote security tooling may emit harmless warnings
+        // on stderr. A complete, valid result block is authoritative.
+        logger.trace('Fast server reuse command stderr:', result.stderr);
+    }
+
+    logger.info(`Reused running remote server in ${Math.round(performance.now() - started)}ms`);
+    return {
+        exitCode: 0,
+        listeningOn: /^\d+$/.test(resultMap.listeningOn) ? parseInt(resultMap.listeningOn, 10) : resultMap.listeningOn,
+        connectionToken: resultMap.connectionToken,
+        logFile: resultMap.logFile,
+        osReleaseId: '',
+        arch: '',
+        platform: resultMap.platform,
+        tmpDir: resultMap.tmpDir,
+    };
+}
+
 const DEFAULT_DOWNLOAD_URL_TEMPLATE = 'https://github.com/VSCodium/vscodium/releases/download/${version}.${release}/vscodium-reh-${os}-${arch}-${version}.${release}.tar.gz';
 
 export async function installCodeServer(
     conn: SSHConnection,
-    serverDownloadUrlTemplate: string | undefined,
-    serverVersion: ServerVersion,
-    extensionIds: string[],
-    envVariables: string[],
-    platform: string | undefined,
-    useSocketPath: boolean,
-    customInstallPath: string | undefined,
-    logger: Log,
-    extensionPath: string
+    options: InstallCodeServerOptions,
+    logger: Log
 ): Promise<ServerInstallResult> {
+    const {
+        serverConfig: vscodeServerConfig,
+        serverDownloadUrlTemplate,
+        serverVersion,
+        extensionIds,
+        envVariables,
+        useSocketPath,
+        customInstallPath,
+        extensionPath,
+    } = options;
+    let { platform } = options;
     let shell = 'powershell';
 
     // detect platform and shell for windows
@@ -129,11 +253,20 @@ export async function installCodeServer(
         const result = await conn.exec('uname -s');
 
         if (result.stdout) {
-            if (result.stdout.includes('windows32')) {
+            const uname = result.stdout.trim().toLowerCase();
+            if (uname.includes('windows32')) {
                 platform = 'windows';
-            } else if (result.stdout.includes('MINGW64')) {
+            } else if (uname.includes('mingw') || uname.includes('msys') || uname.includes('cygwin')) {
                 platform = 'windows';
                 shell = 'bash';
+            } else if (uname === 'linux') {
+                platform = 'linux';
+            } else if (uname === 'darwin') {
+                platform = 'darwin';
+            } else if (uname === 'freebsd') {
+                platform = 'freebsd';
+            } else if (uname === 'dragonfly') {
+                platform = 'dragonfly';
             }
         } else if (result.stderr) {
             if (result.stderr.includes('FullyQualifiedErrorId : CommandNotFoundException')) {
@@ -151,21 +284,18 @@ export async function installCodeServer(
         }
     }
 
+    if (platform === 'windows' && useSocketPath) {
+        throw new ServerInstallError(`Socket-based remote server listening is only supported on Linux and macOS`);
+    }
+
     const scriptId = crypto.randomBytes(12).toString('hex');
-
-    const vscodeServerConfig = await getVSCodeServerConfig();
-
-    // Get the version and release
     const serverDownloadUrlTemplateFinal = serverDownloadUrlTemplate || vscodeServerConfig.serverDownloadUrlTemplate || DEFAULT_DOWNLOAD_URL_TEMPLATE;
-    const bestRelease: IRelease = await fetchRelease(serverDownloadUrlTemplateFinal, vscodeServerConfig.version, vscodeServerConfig.release, serverVersion, logger);
-
-    const installOptions: ServerInstallOptions = {
+    const normalizedExtensionIds = normalizeExtensionIds(extensionIds);
+    const installOptionsBase = {
         id: scriptId,
-        version: bestRelease.version,
         commit: vscodeServerConfig.commit,
         quality: vscodeServerConfig.quality,
-        release: bestRelease.build,
-        extensionIds : sanitizeExtensionIds(extensionIds),
+        extensionIds: normalizedExtensionIds,
         envVariables,
         useSocketPath,
         serverApplicationName: vscodeServerConfig.serverApplicationName,
@@ -175,43 +305,51 @@ export async function installCodeServer(
         serverValidation: vscodeServerConfig.serverValidation,
     };
 
+    // Avoid release discovery (and a possible GitHub request) when the exact
+    // server process is already alive.
+    if (canAttemptFastServerReuse(options)) {
+        const reused = await tryReuseCodeServer(conn, installOptionsBase, platform, logger);
+        if (reused) {
+            return reused;
+        }
+    }
+
+    const bestRelease: IRelease = await fetchRelease(serverDownloadUrlTemplateFinal, vscodeServerConfig.version, vscodeServerConfig.release, serverVersion, logger);
+    const installOptions: ServerInstallOptions = {
+        ...installOptionsBase,
+        version: bestRelease.version,
+        release: bestRelease.build,
+    };
+
     let commandOutput: { stdout: string; stderr: string };
     if (platform === 'windows') {
         const installServerScript = generatePowerShellInstallScript(installOptions, extensionPath);
 
-        logger.trace('Server install command:', installServerScript);
+        logger.trace(`Generated PowerShell server setup script (${installServerScript.length} bytes)`);
 
         const installDir = `$HOME\\${vscodeServerConfig.serverDataFolderName}\\install`;
         const installScript = `${installDir}\\${vscodeServerConfig.commit}.ps1`;
         const endRegex = new RegExp(`${scriptId}: end`);
 
-        // investigate if it's possible to use `-EncodedCommand` flag
-        // https://devblogs.microsoft.com/powershell/invoking-powershell-with-complex-expressions-using-scriptblocks/
-        // eslint-disable-next-line no-useless-assignment
-        let command = '';
+        let command: string;
 
         if (shell === 'powershell') {
-            command = `md -Force ${installDir}; echo @'\n${installServerScript}\n'@ | Set-Content ${installScript}; powershell -ExecutionPolicy ByPass -File "${installScript}"`;
+            command = `md -Force "${installDir}"; echo @'\n${installServerScript}\n'@ | Set-Content "${installScript}"; powershell -ExecutionPolicy ByPass -File "${installScript}"`;
         } else if (shell === 'bash') {
-            command = `mkdir -p ${installDir.replace(/\\/g, '/')} && echo '\n${installServerScript.replace(/'/g, '\'"\'"\'')}\n' > ${installScript.replace(/\\/g, '/')} && powershell -ExecutionPolicy ByPass -File "${installScript}"`;
+            command = `mkdir -p "${installDir.replace(/\\/g, '/')}" && echo '\n${installServerScript.replace(/'/g, '\'"\'"\'')}\n' > "${installScript.replace(/\\/g, '/')}" && powershell -ExecutionPolicy ByPass -File "${installScript}"`;
         } else if (shell === 'cmd') {
-            const script = installServerScript.trim()
-                // remove comments
-                .replace(/^#.*$/gm, '')
-                // remove empty lines
-                .replace(/\n{2,}/gm, '\n')
-                // remove leading spaces
-                .replace(/^\s*/gm, '')
-                // escape double quotes (from powershell/cmd)
-                .replace(/"/g, '"""')
-                // escape single quotes (from cmd)
-                .replace(/'/g, `''`)
-                // escape redirect (from cmd)
-                .replace(/>/g, `^>`)
-                // escape new lines (from powershell/cmd)
-                .replace(/\n/g, '\'`n\'');
-
-            command = `powershell "md -Force ${installDir}" && powershell "echo '${script}'" > ${installScript.replace('$HOME', '%USERPROFILE%')} && powershell -ExecutionPolicy ByPass -File "${installScript.replace('$HOME', '%USERPROFILE%')}"`;
+            // cmd.exe has an 8191-character command line limit. Compressing the
+            // UTF-8 script keeps even large default-extension lists below it
+            // and avoids the fragile cmd/PowerShell double-escaping path.
+            const payload = zlib.gzipSync(Buffer.from(installServerScript, 'utf8')).toString('base64');
+            const loader = [
+                `$d=[Convert]::FromBase64String('${payload}')`,
+                '$m=New-Object IO.MemoryStream(,$d)',
+                '$g=New-Object IO.Compression.GzipStream($m,[IO.Compression.CompressionMode]::Decompress)',
+                '$r=New-Object IO.StreamReader($g,[Text.Encoding]::UTF8)',
+                'iex $r.ReadToEnd()',
+            ].join(';');
+            command = `powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy ByPass -Command "${loader}"`;
 
             logger.trace('Command length (8191 max):', command.length);
 
@@ -226,7 +364,7 @@ export async function installCodeServer(
     } else {
         const installServerScript = generateBashInstallScript(installOptions, extensionPath);
 
-        logger.trace('Server install command:', installServerScript);
+        logger.trace(`Generated Bash server setup script (${installServerScript.length} bytes)`);
         // Use base64 encoding to avoid shell quoting issues across different login shells (bash, csh, tcsh, fish).
         // csh cannot handle multi-line strings inside single quotes with -c, so piping via base64 is the most portable approach.
         const base64Script = Buffer.from(installServerScript).toString('base64');
@@ -247,10 +385,16 @@ export async function installCodeServer(
     if (exitCode !== 0) {
         throw new ServerInstallError(`Couldn't install vscode server on remote server, install script returned non-zero exit status`);
     }
+    if (!resultMap.listeningOn || !resultMap.connectionToken) {
+        throw new ServerInstallError(`Remote server setup returned an incomplete endpoint`);
+    }
 
     const listeningOn = resultMap.listeningOn.match(/^\d+$/)
         ? parseInt(resultMap.listeningOn, 10)
         : resultMap.listeningOn;
+    if (useSocketPath !== (typeof listeningOn === 'string')) {
+        throw new ServerInstallError(`Remote server listener mode changed; stop the existing remote server before reconnecting`);
+    }
 
     const remoteEnvVars = Object.fromEntries(Object.entries(resultMap).filter(([key,]) => envVariables.includes(key)));
 
@@ -295,6 +439,7 @@ function parseServerInstallOutput(str: string, scriptId: string): { [k: string]:
 
 function generateBashInstallScript({ id, quality, version, commit, release, extensionIds, envVariables, useSocketPath, serverApplicationName, serverDataFolderName, serverDownloadUrlTemplate, customInstallPath, serverValidation }: ServerInstallOptions, extensionPath: string): string {
     const extensions = extensionIds.map(extId => '--install-extension ' + extId).join(' ');
+    const extensionIdArray = extensionIds.map(shellSingleQuote).join(' ');
     const serverDataDir = customInstallPath
         ? customInstallPath.replace(/^~(?=\/|$)/, '$HOME')
         : `$HOME/${serverDataFolderName}`;
@@ -310,6 +455,7 @@ function generateBashInstallScript({ id, quality, version, commit, release, exte
         DISTRO_VSCODIUM_RELEASE: release ?? '',
         SERVER_APP_NAME: serverApplicationName,
         SERVER_INITIAL_EXTENSIONS: extensions,
+        SERVER_INITIAL_EXTENSION_IDS: extensionIdArray,
         SERVER_LISTEN_FLAG: listenFlag,
         SERVER_DATA_DIR: serverDataDir,
         SERVER_DATA_DIR_FLAG: customInstallPath ? '--server-data-dir="$SERVER_DATA_DIR"' : '',
@@ -324,6 +470,7 @@ function generateBashInstallScript({ id, quality, version, commit, release, exte
 
 function generatePowerShellInstallScript({ id, quality, version, commit, release, extensionIds, envVariables, useSocketPath, serverApplicationName, serverDataFolderName, serverDownloadUrlTemplate, customInstallPath, serverValidation }: ServerInstallOptions, extensionPath: string): string {
     const extensions = extensionIds.map(extId => '--install-extension ' + extId).join(' ');
+    const extensionIdArray = extensionIds.map(extId => `"${extId}"`).join(', ');
     const downloadUrl = serverDownloadUrlTemplate
         .replace(/\$\{quality\}/g, quality)
         .replace(/\$\{version\}/g, version)
@@ -346,6 +493,7 @@ function generatePowerShellInstallScript({ id, quality, version, commit, release
         DISTRO_VSCODIUM_RELEASE: release ?? '',
         SERVER_APP_NAME: serverApplicationName,
         SERVER_INITIAL_EXTENSIONS: extensions,
+        SERVER_INITIAL_EXTENSION_IDS: extensionIdArray,
         SERVER_LISTEN_FLAG: listenFlag,
         SERVER_DATA_DIR: serverDataDir,
         SERVER_DATA_DIR_FLAG: customInstallPath ? '--server-data-dir=""$SERVER_DATA_DIR""' : '',

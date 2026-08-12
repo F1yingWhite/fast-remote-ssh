@@ -6,6 +6,7 @@ type LogLevel = 'Trace' | 'Info' | 'Error';
 
 export class Log {
     private output: vscode.OutputChannel;
+    private disposed = false;
 
     constructor(name: string) {
         this.output = vscode.window.createOutputChannel(name);
@@ -24,6 +25,10 @@ export class Log {
     }
 
     public logLevel(level: LogLevel, message: string, data?: unknown): void {
+        if (this.disposed) {
+            return;
+        }
+
         this.output.appendLine(`[${level}  - ${this.now()}] ${message}`);
         if (data) {
             this.output.appendLine(toString(data));
@@ -38,10 +43,16 @@ export class Log {
     }
 
     public show() {
-        this.output.show();
+        if (!this.disposed) {
+            this.output.show();
+        }
     }
 
     public dispose() {
+        if (this.disposed) {
+            return;
+        }
+        this.disposed = true;
         this.output.dispose();
     }
 }
