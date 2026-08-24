@@ -124,6 +124,36 @@ describe('createServerCacheIdentity', () => {
 });
 
 describe('RemoteServerManager', () => {
+    it('counts management connections without exposing a quoted remote log path to the shell', async () => {
+        const { context } = createContext();
+        const exec = vi.fn(async () => ({ stdout: '7\n', stderr: '' }));
+        const manager = new RemoteServerManager(context, createLogger(), createInstaller());
+
+        const count = await manager.getManagementConnectionCount(
+            { exec } as unknown as SSHConnection,
+            `/home/developer/log's/server.log`,
+            'linux'
+        );
+
+        expect(count).toBe(7);
+        expect(exec.mock.calls[0][0]).toContain(`'/home/developer/log'"'"'s/server.log'`);
+    });
+
+    it('uses an encoded PowerShell probe for Windows management logs', async () => {
+        const { context } = createContext();
+        const exec = vi.fn(async () => ({ stdout: '3\r\n', stderr: '' }));
+        const manager = new RemoteServerManager(context, createLogger(), createInstaller());
+
+        const count = await manager.getManagementConnectionCount(
+            { exec } as unknown as SSHConnection,
+            'C:\\Users\\developer\\server.log',
+            'win32'
+        );
+
+        expect(count).toBe(3);
+        expect(exec.mock.calls[0][0]).toMatch(/^powershell .* -EncodedCommand [A-Za-z0-9+/=]+$/);
+    });
+
     it('reuses a live compatible cache entry without reinstalling', async () => {
         const { context } = createContext();
         const installServer = createInstaller();
@@ -183,6 +213,24 @@ describe('RemoteServerManager', () => {
         expect(forwardOut).not.toHaveBeenCalled();
         expect(installServer).toHaveBeenCalledTimes(2);
         expect(update).not.toHaveBeenCalledWith(`server-cache:${OPTIONS.authority}`, undefined);
+    });
+
+    it('passes the failed endpoint to setup so it can rotate the server generation', async () => {
+        const { context } = createContext();
+        const installServer = createInstaller();
+        const manager = new RemoteServerManager(context, createLogger(), installServer);
+
+        await manager.resolve(createConnection(), {
+            ...OPTIONS,
+            forceRefresh: true,
+            replaceServerEndpoint: 41234,
+        });
+
+        expect(installServer).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ replaceServerEndpoint: 41234 }),
+            expect.anything()
+        );
     });
 
     it('does not overwrite a cache entry refreshed by another window during setup', async () => {

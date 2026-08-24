@@ -35,6 +35,7 @@ export type RemoteServerOptions = {
     routeIdentity: string;
     forceRefresh: boolean;
     extensionPath: string;
+    replaceServerEndpoint?: number | string;
 };
 
 type InstallServer = typeof installCodeServer;
@@ -137,6 +138,7 @@ export class RemoteServerManager {
             useSocketPath: options.useSocketPath,
             customInstallPath: options.customInstallPath,
             extensionPath: options.extensionPath,
+            replaceServerEndpoint: options.replaceServerEndpoint,
         }, this.logger);
 
         if (!options.useSocketPath && typeof result.listeningOn === 'number') {
@@ -153,6 +155,32 @@ export class RemoteServerManager {
         }
 
         return result;
+    }
+
+    async getManagementConnectionCount(conn: SSHConnection, logFile: string, platform: string): Promise<number | undefined> {
+        try {
+            let command: string;
+            if (platform === 'win32' || platform === 'windows') {
+                const escapedPath = logFile.replace(/'/g, '\'\'');
+                const script = [
+                    `$path='${escapedPath}'`,
+                    `if (Test-Path $path) { (Select-String -Path $path -SimpleMatch '[ManagementConnection] New connection established.').Count } else { 0 }`,
+                ].join(';');
+                const encoded = Buffer.from(script, 'utf16le').toString('base64');
+                command = `powershell -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
+            } else {
+                const quotedPath = `'${logFile.replace(/'/g, `'"'"'`)}'`;
+                command = `grep -cF '[ManagementConnection] New connection established.' -- ${quotedPath} 2>/dev/null || true`;
+            }
+
+            const result = await conn.exec(command);
+            const lines = result.stdout.trim().split(/\r?\n/);
+            const count = lines[lines.length - 1];
+            return count && /^\d+$/.test(count) ? parseInt(count, 10) : undefined;
+        } catch (error) {
+            this.logger.trace('Could not inspect the remote Agent management connection count', error);
+            return undefined;
+        }
     }
 
     private async updateCacheIfUnchanged(cacheKey: string, observedValue: unknown, value: CachedServer): Promise<void> {
@@ -184,6 +212,7 @@ export class RemoteServerManager {
         try {
             const probe = await this.probeCachedServer(conn, value.listeningOn);
             probe.close();
+            const managementConnectionCount = await this.getManagementConnectionCount(conn, value.logFile, value.platform);
             this.logger.info(`Reused cached remote server in ${Math.round(performance.now() - started)}ms`);
             return {
                 exitCode: 0,
@@ -194,6 +223,7 @@ export class RemoteServerManager {
                 arch: '',
                 platform: value.platform,
                 tmpDir: value.tmpDir,
+                managementConnectionCount,
             };
         } catch (error) {
             this.logger.trace(`Cached remote server was stale after ${Math.round(performance.now() - started)}ms`, error);

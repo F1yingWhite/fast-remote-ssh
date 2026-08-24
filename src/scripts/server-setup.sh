@@ -15,9 +15,14 @@ SERVER_DATA_DIR="%%SERVER_DATA_DIR%%"
 SERVER_DATA_DIR_FLAG="%%SERVER_DATA_DIR_FLAG%%"
 SERVER_DIR="$SERVER_DATA_DIR/bin/$DISTRO_COMMIT"
 SERVER_SCRIPT="$SERVER_DIR/bin/$SERVER_APP_NAME"
-SERVER_LOGFILE="$SERVER_DATA_DIR/.$DISTRO_COMMIT.log"
-SERVER_PIDFILE="$SERVER_DATA_DIR/.$DISTRO_COMMIT.pid"
-SERVER_TOKENFILE="$SERVER_DATA_DIR/.$DISTRO_COMMIT.token"
+SERVER_METADATA_PREFIX="$SERVER_DATA_DIR/.$DISTRO_COMMIT"
+SERVER_ACTIVEFILE="$SERVER_METADATA_PREFIX.active"
+SERVER_GENERATION=
+SERVER_LOGFILE="$SERVER_METADATA_PREFIX.log"
+SERVER_PIDFILE="$SERVER_METADATA_PREFIX.pid"
+SERVER_TOKENFILE="$SERVER_METADATA_PREFIX.token"
+SERVER_GENERATION_ID="%%SCRIPT_ID%%"
+REPLACE_SERVER_ENDPOINT=%%REPLACE_SERVER_ENDPOINT%%
 SERVER_ARCH=
 SERVER_CONNECTION_TOKEN=
 SERVER_DOWNLOAD_URL=
@@ -27,7 +32,33 @@ LISTENING_ON=
 OS_RELEASE_ID=
 ARCH=
 PLATFORM=
+MANAGEMENT_CONNECTION_COUNT=0
 LOCKDIR_HELD=false
+ROTATED_SERVER=false
+
+select_server_metadata() {
+  SERVER_GENERATION=
+  if [[ -s "$SERVER_ACTIVEFILE" ]]; then
+    SERVER_GENERATION="$(cat "$SERVER_ACTIVEFILE" 2>/dev/null)"
+  fi
+  if ! [[ "$SERVER_GENERATION" =~ ^[a-f0-9]+$ ]]; then
+    SERVER_GENERATION=
+  fi
+
+  SERVER_METADATA_SUFFIX="${SERVER_GENERATION:+.$SERVER_GENERATION}"
+  SERVER_LOGFILE="$SERVER_METADATA_PREFIX$SERVER_METADATA_SUFFIX.log"
+  SERVER_PIDFILE="$SERVER_METADATA_PREFIX$SERVER_METADATA_SUFFIX.pid"
+  SERVER_TOKENFILE="$SERVER_METADATA_PREFIX$SERVER_METADATA_SUFFIX.token"
+}
+
+select_new_server_generation() {
+  SERVER_GENERATION="$SERVER_GENERATION_ID"
+  SERVER_METADATA_SUFFIX=".$SERVER_GENERATION"
+  SERVER_LOGFILE="$SERVER_METADATA_PREFIX$SERVER_METADATA_SUFFIX.log"
+  SERVER_PIDFILE="$SERVER_METADATA_PREFIX$SERVER_METADATA_SUFFIX.pid"
+  SERVER_TOKENFILE="$SERVER_METADATA_PREFIX$SERVER_METADATA_SUFFIX.token"
+  ROTATED_SERVER=true
+}
 
 select_tmp_dir() {
   if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -w "$XDG_RUNTIME_DIR" && -x "$XDG_RUNTIME_DIR" ]]; then
@@ -65,6 +96,7 @@ print_install_results_and_exit() {
   echo "arch==$ARCH=="
   echo "platform==$PLATFORM=="
   echo "tmpDir==$TMP_DIR=="
+  echo "managementConnectionCount==$MANAGEMENT_CONNECTION_COUNT=="
 %%ENV_VAR_LINES%%
   echo "%%SCRIPT_ID%%: end"
   release_install_lock
@@ -149,6 +181,11 @@ else
   fi
   trap 'release_install_lock; trap - EXIT INT HUP; exit' EXIT INT HUP
 fi
+
+# Read the active generation only after taking the install lock. Concurrent
+# resolver retries can then agree on one replacement without killing or
+# overwriting the token files of an Agent still serving another window.
+select_server_metadata
 
 # Check if platform is supported
 if ! command -v uname >/dev/null 2>&1; then
@@ -302,12 +339,32 @@ if %%MODIFY_PRODUCT_JSON%%; then
   fi
 fi
 
-# Try to find if server is already running
+# Try to find if the active server generation is already running.
+SERVER_RUNNING_PROCESS=
 if [[ -f $SERVER_PIDFILE ]]; then
   SERVER_PID="$(cat $SERVER_PIDFILE)"
   SERVER_RUNNING_PROCESS="$(ps -o pid,args -p $SERVER_PID | grep $SERVER_SCRIPT)"
-else
+elif [[ ! -e $SERVER_ACTIVEFILE ]]; then
+  # Compatibility fallback for server installations created before pid files
+  # were reliable. Never use it after generation tracking has been enabled,
+  # because it could select an older Agent that is intentionally draining.
   SERVER_RUNNING_PROCESS="$(ps -o pid,args -A | grep $SERVER_SCRIPT | grep -v grep)"
+fi
+
+
+CURRENT_LISTENING_ON=
+if [[ -s $SERVER_LOGFILE ]]; then
+  CURRENT_LISTENING_ON="$(sed -n 's/^Extension host agent listening on //p' "$SERVER_LOGFILE" | tail -n 1)"
+fi
+
+if [[ -n $REPLACE_SERVER_ENDPOINT ]]; then
+  if [[ -z $CURRENT_LISTENING_ON || $CURRENT_LISTENING_ON == "$REPLACE_SERVER_ENDPOINT" ]]; then
+    echo "Rotating unhealthy server endpoint $REPLACE_SERVER_ENDPOINT to a new generation"
+    select_new_server_generation
+    SERVER_RUNNING_PROCESS=
+  else
+    echo "Another resolver already replaced server endpoint $REPLACE_SERVER_ENDPOINT with $CURRENT_LISTENING_ON"
+  fi
 fi
 
 if [[ -n $SERVER_RUNNING_PROCESS ]]; then
@@ -377,6 +434,20 @@ if [[ -f $SERVER_LOGFILE ]]; then
 else
   echo "Error: server log file not found $SERVER_LOGFILE"
   print_install_results_and_exit 1
+fi
+
+if [[ "$ROTATED_SERVER" == "true" ]]; then
+  SERVER_ACTIVEFILE_TMP="$SERVER_ACTIVEFILE.$SERVER_GENERATION.tmp"
+  if ! printf '%s\n' "$SERVER_GENERATION" > "$SERVER_ACTIVEFILE_TMP" || ! mv -f "$SERVER_ACTIVEFILE_TMP" "$SERVER_ACTIVEFILE"; then
+    rm -f "$SERVER_ACTIVEFILE_TMP" 2>/dev/null || true
+    echo "Error: could not activate replacement server generation"
+    print_install_results_and_exit 1
+  fi
+fi
+
+MANAGEMENT_CONNECTION_COUNT="$(grep -cF '[ManagementConnection] New connection established.' "$SERVER_LOGFILE" 2>/dev/null || true)"
+if ! [[ "$MANAGEMENT_CONNECTION_COUNT" =~ ^[0-9]+$ ]]; then
+  MANAGEMENT_CONNECTION_COUNT=0
 fi
 
 # Finish server setup

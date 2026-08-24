@@ -2,31 +2,68 @@
 
 ![Open Remote SSH](docs/images/open-remote-ssh.gif)
 
-An independently maintained, performance- and reliability-focused distribution of
-[Open Remote - SSH](https://github.com/jeanp413/open-remote-ssh) for VSCodium and Code OSS.
-It keeps the familiar `remote.SSH.*` settings and `ssh-remote` authority while improving
-connection reuse, recovery, forwarding, authentication, and diagnostics.
+Fast Remote - SSH lets you use a remote machine as a complete development environment from
+VSCodium or Code OSS. Connect to any configured SSH host, open remote folders, edit files,
+use terminals, run tasks and debuggers, and install extensions on the remote host while the
+editor interface stays on your local machine.
+
+This project is our independently maintained distribution of
+[Open Remote - SSH](https://github.com/jeanp413/open-remote-ssh). It remains compatible with
+the familiar `remote.SSH.*` settings, OpenSSH configuration files, and the `ssh-remote`
+authority, with additional work on connection reuse, recovery, forwarding, and diagnostics.
 
 > [!IMPORTANT]
 > Disable or uninstall `jeanp413.open-remote-ssh` before enabling this extension.
 > Both extensions provide the same `ssh-remote` authority, commands, views, and settings,
 > so they are not designed to run at the same time.
 
-## Performance and reliability changes
+## What it provides
 
-- Reuses the remote server endpoint and connection token across windows.
-- Probes cached endpoints and automatically falls back when a cache entry is stale.
-- Recovers an already-running remote server without rerunning the full installation script.
-- Tries public-key authentication directly while retaining compatibility fallbacks.
-- Sends the Remote Extension Host channel through direct SSH forwarding.
-- Lets the operating system allocate local forwarding ports to avoid port races.
-- Enables TCP `NODELAY` and configurable encrypted SSH keepalives.
-- Serializes concurrent remote server setup and improves cleanup during reconnects.
-- Adds per-stage performance logs for connection diagnosis.
+- Connect to hosts from your OpenSSH configuration, including non-default users and ports.
+- Open folders and workspaces directly on Linux, macOS, Windows, and supported BSD hosts.
+- Run terminals, tasks, debuggers, language tools, and remote extensions beside your code.
+- Support public-key, password, keyboard-interactive, SSH agent, `ProxyJump`, and
+  `ProxyCommand` connection flows.
+- Install and start a matching VSCodium Remote Agent when the host does not already have one.
+- Forward the editor's management and extension-host channels through the encrypted SSH
+  connection.
 
-The optimization primarily reduces connection and reconnection overhead. Once connected,
-file operations still run through the VSCodium remote server protocol and remain bounded by
-network latency, remote storage, and server-side work.
+## Improvements in this distribution
+
+### Faster connection reuse
+
+- Cache the Remote Agent endpoint and connection token across VSCodium windows.
+- Probe a cached endpoint with a bounded SSH channel check before trusting it.
+- Recover a running Remote Agent without executing the full installation script again.
+- Bypass a suspect cache on resolver retries while preserving newer cache data written by
+  another window.
+- Try public-key authentication directly, while retaining password, keyboard-interactive,
+  and no-auth compatibility fallbacks.
+
+### A thinner forwarding path
+
+- Carry the Management and Remote Extension Host connections over direct SSH forwarding.
+- Ask the operating system to allocate local forwarding ports atomically, avoiding the
+  scan-then-listen race between concurrent windows.
+- Enable TCP `NODELAY` on the SSH transport and local tunnel sockets for latency-sensitive
+  protocol messages.
+
+### More predictable recovery
+
+- Send configurable encrypted SSH keepalives so idle NAT or firewall state is detected
+  before an editor operation needs the connection.
+- Serialize remote installation and startup across concurrent windows on Linux, macOS, and
+  Windows.
+- Clean up old SSH clients, tunnels, jump-host connections, and agent-forwarding channels
+  before a reconnect replaces them.
+- Rotate an Agent that accepts SSH forwarding but never establishes a management connection,
+  while allowing older generations to keep serving other VSCodium windows.
+- Fall back to a usable temporary directory when a stale `XDG_RUNTIME_DIR` points to a
+  missing or inaccessible path, and pass the corrected environment to the Remote Agent.
+
+The extension also records timings for SSH configuration loading, authentication, Remote
+Agent recovery, tunnel creation, and total authority resolution. Use **Remote-SSH: Show
+Log** when a connection does not behave as expected.
 
 ## SSH Host Requirements
 You can connect to a running SSH server on the following platforms.

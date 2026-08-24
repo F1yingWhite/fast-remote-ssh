@@ -6,7 +6,7 @@ import * as ssh2 from 'ssh2';
 import type { ParsedKey } from 'ssh2-streams';
 import { Log } from './common/logger';
 import SSHDestination from './ssh/sshDestination';
-import SSHConnection from './ssh/sshConnection';
+import SSHConnection, { TunnelActivity } from './ssh/sshConnection';
 import SSHConfiguration from './ssh/sshConfig';
 import { gatherIdentityFiles, SSHKey } from './ssh/identityFiles';
 import { untildify, exists as fileExists } from './common/files';
@@ -24,6 +24,22 @@ export const REMOTE_SSH_AUTHORITY = 'ssh-remote';
 
 export function getRemoteAuthority(host: string) {
     return `${REMOTE_SSH_AUTHORITY}+${host}`;
+}
+
+export function shouldRotateServerOnRetry(
+    resolveAttempt: number,
+    activity: TunnelActivity | undefined,
+    alreadyRotated: boolean,
+    previousEndpoint: number | string | undefined,
+    managementConnectionEstablished: boolean | undefined
+): boolean {
+    return resolveAttempt > 1
+        && previousEndpoint !== undefined
+        && !alreadyRotated
+        && activity !== undefined
+        && activity.acceptedConnections > 0
+        && (managementConnectionEstablished === false
+            || managementConnectionEstablished === undefined && activity.remoteToLocalBytes === 0);
 }
 
 class TunnelInfo implements vscode.Disposable {
@@ -116,6 +132,13 @@ export class RemoteSSHResolver implements vscode.RemoteAuthorityResolver, vscode
     private readonly serverManager: RemoteServerManager;
     private resolveInFlight: Thenable<vscode.ResolverResult> | undefined;
     private resolvingAuthority: string | undefined;
+    private readonly lastServerStates = new Map<string, {
+        endpoint: number | string;
+        logFile: string;
+        platform: string;
+        managementConnectionCount: number | undefined;
+    }>();
+    private readonly rotatedServerAuthorities = new Set<string>();
     private disposed = false;
 
     constructor(
@@ -182,6 +205,45 @@ export class RemoteSSHResolver implements vscode.RemoteAuthorityResolver, vscode
             cancellable: false
         }, async () => {
             try {
+                const previousTunnelActivity = this.sshConnection?.getTunnelActivity();
+                const previousServerState = this.lastServerStates.get(authority);
+                let managementConnectionEstablished: boolean | undefined;
+                if (this.sshConnection && previousServerState?.managementConnectionCount !== undefined) {
+                    const currentCount = await this.serverManager.getManagementConnectionCount(
+                        this.sshConnection,
+                        previousServerState.logFile,
+                        previousServerState.platform
+                    );
+                    if (currentCount !== undefined) {
+                        managementConnectionEstablished = currentCount > previousServerState.managementConnectionCount;
+                    }
+                }
+                if (managementConnectionEstablished === true
+                    || managementConnectionEstablished === undefined && previousTunnelActivity?.remoteToLocalBytes) {
+                    // The previous generation completed real protocol traffic.
+                    // Preserve it for normal reconnection and allow one future
+                    // failed management-connection episode to rotate independently.
+                    this.rotatedServerAuthorities.delete(authority);
+                }
+                const previousEndpoint = previousServerState?.endpoint;
+                const replaceServerEndpoint = shouldRotateServerOnRetry(
+                    context.resolveAttempt,
+                    previousTunnelActivity,
+                    this.rotatedServerAuthorities.has(authority),
+                    previousEndpoint,
+                    managementConnectionEstablished
+                ) ? previousEndpoint : undefined;
+                if (previousTunnelActivity) {
+                    this.logger.trace(
+                        `Previous tunnel activity: ${previousTunnelActivity.acceptedConnections} connection(s), `
+                        + `${previousTunnelActivity.localToRemoteBytes} bytes sent, `
+                        + `${previousTunnelActivity.remoteToLocalBytes} bytes received`
+                        + (managementConnectionEstablished === undefined
+                            ? ''
+                            : `, management connection ${managementConnectionEstablished ? 'established' : 'not established'}`)
+                    );
+                }
+
                 // VS Code invokes the resolver again after a transport failure. Tear
                 // down the previous listener/session before replacing its references;
                 // otherwise every reconnect leaks an SSH client and a loopback port.
@@ -289,6 +351,13 @@ export class RemoteSSHResolver implements vscode.RemoteAuthorityResolver, vscode
                     agentForward,
                     agent,
                     authHandler: (arg0, arg1, arg2) => (sshAuthHandler(arg0, arg1, arg2), undefined),
+                    tunnelEventLogger: (message, error) => {
+                        if (error) {
+                            this.logger.error(message, error);
+                        } else {
+                            this.logger.trace(message);
+                        }
+                    },
                 });
                 const sshStarted = performance.now();
                 await this.sshConnection.connect();
@@ -333,6 +402,17 @@ export class RemoteSSHResolver implements vscode.RemoteAuthorityResolver, vscode
                     routeIdentity: routeParts.join('|'),
                     forceRefresh: context.resolveAttempt > 1,
                     extensionPath: this.context.extensionPath,
+                    replaceServerEndpoint,
+                });
+                if (replaceServerEndpoint !== undefined) {
+                    this.rotatedServerAuthorities.add(authority);
+                    this.logger.info(`Rotated remote server endpoint after the editor tunnel failed to establish a management connection`);
+                }
+                this.lastServerStates.set(authority, {
+                    endpoint: installResult.listeningOn,
+                    logFile: installResult.logFile,
+                    platform: installResult.platform,
+                    managementConnectionCount: installResult.managementConnectionCount,
                 });
                 this.logger.info(`Performance: remote server ready in ${Math.round(performance.now() - serverStarted)}ms`);
 

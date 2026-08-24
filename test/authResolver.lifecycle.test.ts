@@ -2,7 +2,7 @@ import type * as cp from 'node:child_process';
 import type * as ssh2 from 'ssh2';
 import type * as vscode from 'vscode';
 import { describe, expect, it, vi } from 'vitest';
-import { RemoteSSHResolver } from '../src/authResolver';
+import { RemoteSSHResolver, shouldRotateServerOnRetry } from '../src/authResolver';
 import { Log } from '../src/common/logger';
 import SSHConnection from '../src/ssh/sshConnection';
 
@@ -21,6 +21,23 @@ function createResolver(): RemoteSSHResolver {
 }
 
 describe('RemoteSSHResolver lifecycle', () => {
+    it('rotates only a retry that never established a management connection', () => {
+        const zeroResponse = {
+            acceptedConnections: 2,
+            localToRemoteBytes: 1024,
+            remoteToLocalBytes: 0,
+        };
+
+        expect(shouldRotateServerOnRetry(2, zeroResponse, false, 41234, false)).toBe(true);
+        expect(shouldRotateServerOnRetry(1, zeroResponse, false, 41234, false)).toBe(false);
+        expect(shouldRotateServerOnRetry(2, zeroResponse, true, 41234, false)).toBe(false);
+        expect(shouldRotateServerOnRetry(2, zeroResponse, false, undefined, false)).toBe(false);
+        expect(shouldRotateServerOnRetry(2, { ...zeroResponse, acceptedConnections: 0 }, false, 41234, false)).toBe(false);
+        expect(shouldRotateServerOnRetry(2, { ...zeroResponse, remoteToLocalBytes: 4096 }, false, 41234, false)).toBe(true);
+        expect(shouldRotateServerOnRetry(31, zeroResponse, false, 41234, true)).toBe(false);
+        expect(shouldRotateServerOnRetry(2, { ...zeroResponse, remoteToLocalBytes: 4096 }, false, 41234, undefined)).toBe(false);
+    });
+
     it('shares a concurrent authority setup instead of creating competing sessions', async () => {
         const resolver = createResolver();
         const internals = resolver as unknown as ResolverInternals;

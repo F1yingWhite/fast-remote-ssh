@@ -89,6 +89,7 @@ export type ServerInstallOptions = {
     serverDownloadUrlTemplate: string;
     customInstallPath?: string;
     serverValidation: ServerValidation;
+    replaceServerEndpoint?: number | string;
 };
 
 export type ServerInstallResult = {
@@ -100,6 +101,7 @@ export type ServerInstallResult = {
     arch: string;
     platform: string;
     tmpDir: string;
+    managementConnectionCount?: number;
     [key: string]: unknown;
 };
 
@@ -113,6 +115,12 @@ export type InstallCodeServerOptions = {
     useSocketPath: boolean;
     customInstallPath: string | undefined;
     extensionPath: string;
+    /**
+     * Endpoint returned by the previous resolver attempt. When present, the
+     * setup script must rotate away from that exact server generation instead
+     * of accepting PID/port liveness as proof that the protocol is healthy.
+     */
+    replaceServerEndpoint?: number | string;
 };
 
 /**
@@ -133,6 +141,7 @@ export function canAttemptFastServerReuse(options: InstallCodeServerOptions): bo
     return options.serverVersion === 'match'
         && options.serverConfig.serverValidation === 'strict'
         && !options.useSocketPath
+        && options.replaceServerEndpoint === undefined
         && normalizeExtensionIds(options.extensionIds).length === 0
         && options.envVariables.length === 0;
 }
@@ -174,9 +183,15 @@ async function tryReuseCodeServer(
         `commit=${shellSingleQuote(installOptions.commit)}`,
         `server_name=${shellSingleQuote(installOptions.serverApplicationName)}`,
         'server_script="$data_dir/bin/$commit/bin/$server_name"',
-        'pid_file="$data_dir/.$commit.pid"',
-        'token_file="$data_dir/.$commit.token"',
-        'log_file="$data_dir/.$commit.log"',
+        'metadata_prefix="$data_dir/.$commit"',
+        'active_file="$metadata_prefix.active"',
+        'generation=""',
+        'if [ -s "$active_file" ]; then generation="$(cat "$active_file")"; fi',
+        'if ! [[ "$generation" =~ ^[a-f0-9]+$ ]]; then generation=""; fi',
+        'metadata_suffix="${generation:+.$generation}"',
+        'pid_file="$metadata_prefix$metadata_suffix.pid"',
+        'token_file="$metadata_prefix$metadata_suffix.token"',
+        'log_file="$metadata_prefix$metadata_suffix.log"',
         '[ -x "$server_script" ] && [ -s "$pid_file" ] && [ -s "$token_file" ] && [ -s "$log_file" ] || exit 20',
         'pid="$(cat "$pid_file")"',
         'kill -0 "$pid" 2>/dev/null || exit 21',
@@ -193,6 +208,7 @@ async function tryReuseCodeServer(
         'printf "logFile==%s==\\n" "$log_file"',
         `printf "platform==%s==\\n" ${shellSingleQuote(platform || 'unknown')}`,
         'printf "tmpDir==%s==\\n" "$tmp_dir"',
+        'printf "managementConnectionCount==%s==\\n" "$(grep -cF "[ManagementConnection] New connection established." "$log_file" 2>/dev/null || true)"',
         `printf '%s\\n' ${shellSingleQuote(`${marker}: end`)}`,
     ].join('; ');
 
@@ -225,6 +241,9 @@ async function tryReuseCodeServer(
         arch: '',
         platform: resultMap.platform,
         tmpDir: resultMap.tmpDir,
+        managementConnectionCount: /^\d+$/.test(resultMap.managementConnectionCount)
+            ? parseInt(resultMap.managementConnectionCount, 10)
+            : undefined,
     };
 }
 
@@ -244,6 +263,7 @@ export async function installCodeServer(
         useSocketPath,
         customInstallPath,
         extensionPath,
+        replaceServerEndpoint,
     } = options;
     let { platform } = options;
     let shell = 'powershell';
@@ -303,6 +323,7 @@ export async function installCodeServer(
         serverDownloadUrlTemplate: serverDownloadUrlTemplateFinal,
         customInstallPath,
         serverValidation: vscodeServerConfig.serverValidation,
+        replaceServerEndpoint,
     };
 
     // Avoid release discovery (and a possible GitHub request) when the exact
@@ -407,6 +428,9 @@ export async function installCodeServer(
         arch: resultMap.arch,
         platform: resultMap.platform,
         tmpDir: resultMap.tmpDir,
+        managementConnectionCount: /^\d+$/.test(resultMap.managementConnectionCount)
+            ? parseInt(resultMap.managementConnectionCount, 10)
+            : undefined,
         ...remoteEnvVars
     };
 }
@@ -437,7 +461,7 @@ function parseServerInstallOutput(str: string, scriptId: string): { [k: string]:
     return resultMap;
 }
 
-function generateBashInstallScript({ id, quality, version, commit, release, extensionIds, envVariables, useSocketPath, serverApplicationName, serverDataFolderName, serverDownloadUrlTemplate, customInstallPath, serverValidation }: ServerInstallOptions, extensionPath: string): string {
+function generateBashInstallScript({ id, quality, version, commit, release, extensionIds, envVariables, useSocketPath, serverApplicationName, serverDataFolderName, serverDownloadUrlTemplate, customInstallPath, serverValidation, replaceServerEndpoint }: ServerInstallOptions, extensionPath: string): string {
     const extensions = extensionIds.map(extId => '--install-extension ' + extId).join(' ');
     const extensionIdArray = extensionIds.map(shellSingleQuote).join(' ');
     const serverDataDir = customInstallPath
@@ -465,10 +489,11 @@ function generateBashInstallScript({ id, quality, version, commit, release, exte
         ENV_VAR_LINES: envVarLines,
         MODIFY_PRODUCT_JSON: serverValidation === 'force' ? 'true' : 'false',
         SERVER_CONNECTION_TOKEN: crypto.randomUUID(),
+        REPLACE_SERVER_ENDPOINT: shellSingleQuote(replaceServerEndpoint?.toString() ?? ''),
     }, extensionPath);
 }
 
-function generatePowerShellInstallScript({ id, quality, version, commit, release, extensionIds, envVariables, useSocketPath, serverApplicationName, serverDataFolderName, serverDownloadUrlTemplate, customInstallPath, serverValidation }: ServerInstallOptions, extensionPath: string): string {
+function generatePowerShellInstallScript({ id, quality, version, commit, release, extensionIds, envVariables, useSocketPath, serverApplicationName, serverDataFolderName, serverDownloadUrlTemplate, customInstallPath, serverValidation, replaceServerEndpoint }: ServerInstallOptions, extensionPath: string): string {
     const extensions = extensionIds.map(extId => '--install-extension ' + extId).join(' ');
     const extensionIdArray = extensionIds.map(extId => `"${extId}"`).join(', ');
     const downloadUrl = serverDownloadUrlTemplate
@@ -503,5 +528,6 @@ function generatePowerShellInstallScript({ id, quality, version, commit, release
         ENV_VAR_LINES: envVarLines,
         MODIFY_PRODUCT_JSON: serverValidation === 'force' ? '$true' : '$false',
         SERVER_CONNECTION_TOKEN: crypto.randomUUID(),
+        REPLACE_SERVER_ENDPOINT: `'${(replaceServerEndpoint?.toString() ?? '').replace(/'/g, '\'\'')}'`,
     }, extensionPath);
 }

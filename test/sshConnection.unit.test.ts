@@ -7,8 +7,8 @@ import SSHConnection from '../src/ssh/sshConnection';
 
 type ForwardCallback = (error: Error | undefined, stream: ClientChannel) => void;
 
-function createConnection(forwardOut: (callback: ForwardCallback) => void) {
-    const connection = new SSHConnection({ host: 'example.test', username: 'test' });
+function createConnection(forwardOut: (callback: ForwardCallback) => void, tunnelEventLogger?: (message: string, error?: Error) => void) {
+    const connection = new SSHConnection({ host: 'example.test', username: 'test', tunnelEventLogger });
     const destroy = vi.fn();
     const client = {
         destroy,
@@ -29,7 +29,11 @@ function createConnection(forwardOut: (callback: ForwardCallback) => void) {
 describe('SSHConnection tunnel lifecycle', () => {
     it('binds the tunnel to loopback and closes its active sockets', async () => {
         const remoteStream = new PassThrough();
-        const { connection } = createConnection(callback => callback(undefined, remoteStream as unknown as ClientChannel));
+        const tunnelEventLogger = vi.fn();
+        const { connection } = createConnection(
+            callback => callback(undefined, remoteStream as unknown as ClientChannel),
+            tunnelEventLogger
+        );
         const tunnel = await connection.addTunnel({
             name: 'primary',
             localPort: 0,
@@ -52,6 +56,16 @@ describe('SSHConnection tunnel lifecycle', () => {
         }
         expect(socket.destroyed).toBe(true);
         expect(tunnel.server.listening).toBe(false);
+        expect(tunnel.activity).toEqual({
+            acceptedConnections: 1,
+            localToRemoteBytes: 4,
+            remoteToLocalBytes: 4,
+        });
+        expect(tunnelEventLogger.mock.calls.map(([message]) => message)).toEqual(expect.arrayContaining([
+            expect.stringContaining('Tunnel socket accepted for primary'),
+            expect.stringContaining('SSH forwarding established for primary'),
+            expect.stringContaining('local->remote 4 bytes, remote->local 4 bytes'),
+        ]));
     });
 
     it('destroys a late SSH channel when the local client has gone away', async () => {

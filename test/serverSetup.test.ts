@@ -60,6 +60,7 @@ function resultBlock(id: string, platform = 'linux', listeningOn = '41234'): str
         'arch==x64==',
         `platform==${platform}==`,
         'tmpDir==/tmp==',
+        'managementConnectionCount==0==',
         `${id}: end`,
     ].join('\n');
 }
@@ -112,6 +113,7 @@ describe('server setup reuse policy', () => {
         expect(canAttemptFastServerReuse({ ...OPTIONS, envVariables: ['SSH_AUTH_SOCK'] })).toBe(false);
         expect(canAttemptFastServerReuse({ ...OPTIONS, serverVersion: 'closest' })).toBe(false);
         expect(canAttemptFastServerReuse({ ...OPTIONS, useSocketPath: true })).toBe(false);
+        expect(canAttemptFastServerReuse({ ...OPTIONS, replaceServerEndpoint: 41234 })).toBe(false);
         expect(canAttemptFastServerReuse({
             ...OPTIONS,
             serverConfig: { ...SERVER_CONFIG, serverValidation: 'skip' },
@@ -159,6 +161,26 @@ describe('server setup reuse policy', () => {
         expect(generatedScript).toContain('[[ $ELAPSED -ge 10 ]]');
         expect(generatedScript).toContain('cannot record the portable install lock owner');
         expect(generatedScript).not.toContain('skipping install lock');
+        expect(spawnSync('bash', ['-n'], { input: generatedScript }).status).toBe(0);
+    });
+
+    it('rotates away from the endpoint that failed the editor handshake', async () => {
+        let generatedScript = '';
+        const exec = vi.fn(async (command: string) => {
+            generatedScript = decodeBashInstallCommand(command);
+            return { stdout: resultBlock(bashScriptId(generatedScript)), stderr: '' };
+        });
+        const conn = createConnection({ exec } as unknown as Partial<SSHConnection>);
+
+        await installCodeServer(conn, { ...OPTIONS, replaceServerEndpoint: 41234 }, createLogger());
+
+        expect(exec).toHaveBeenCalledOnce();
+        expect(generatedScript).toContain(`REPLACE_SERVER_ENDPOINT='41234'`);
+        expect(generatedScript).toContain('select_new_server_generation');
+        expect(generatedScript).toContain('Rotating unhealthy server endpoint');
+        expect(generatedScript).toContain('Another resolver already replaced server endpoint');
+        expect(generatedScript).toContain('SERVER_ACTIVEFILE_TMP=');
+        expect(generatedScript).toContain('mv -f "$SERVER_ACTIVEFILE_TMP" "$SERVER_ACTIVEFILE"');
         expect(spawnSync('bash', ['-n'], { input: generatedScript }).status).toBe(0);
     });
 
@@ -233,6 +255,34 @@ describe('server setup reuse policy', () => {
         expect(installCommand).toContain('for($I = 1; $I -le 35; $I++)');
         expect(installCommand).toContain('if(!$LISTENING_ON)');
         expect(installCommand).toContain('if(!(gps -Id $SERVER_ID))');
+    });
+
+    it('emits generation rotation for a failed Windows endpoint', async () => {
+        let installCommand = '';
+        const exec = vi.fn(async () => ({
+            stdout: '',
+            stderr: 'FullyQualifiedErrorId : CommandNotFoundException',
+        }));
+        const execPartial = vi.fn(async (command: string) => {
+            installCommand = command;
+            const id = /([a-f0-9]+): end/.exec(command)?.[1];
+            if (!id) {
+                throw new Error('Generated PowerShell script has no result marker');
+            }
+            return { stdout: resultBlock(id, 'win32'), stderr: '' };
+        });
+        const conn = createConnection({ exec, execPartial } as unknown as Partial<SSHConnection>);
+
+        await installCodeServer(conn, {
+            ...OPTIONS,
+            platform: 'windows',
+            replaceServerEndpoint: 41234,
+        }, createLogger());
+
+        expect(installCommand).toContain(`$REPLACE_SERVER_ENDPOINT='41234'`);
+        expect(installCommand).toContain('Select-NewServerGeneration');
+        expect(installCommand).toContain('Rotating unhealthy server endpoint');
+        expect(installCommand).toContain('Move-Item -Force $SERVER_ACTIVEFILE_TMP $SERVER_ACTIVEFILE');
     });
 
     it('fails before generating an invalid socket listener on Windows', async () => {

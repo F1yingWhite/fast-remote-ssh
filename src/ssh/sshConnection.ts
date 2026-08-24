@@ -11,6 +11,8 @@ export interface SSHConnectConfig extends ConnectConfig {
     uniqueId?: string;
     /** Path to private key */
     identity?: string | Buffer;
+    /** Receives lifecycle diagnostics for locally accepted tunnel sockets. */
+    tunnelEventLogger?: (message: string, error?: Error) => void;
 }
 
 export interface SSHTunnelConfig {
@@ -29,6 +31,13 @@ export interface SSHTunnelConfig {
 type ActiveTunnel = SSHTunnelConfig & {
     server: Server;
     connections: Set<net.Socket>;
+    activity: TunnelActivity;
+};
+
+export type TunnelActivity = {
+    acceptedConnections: number;
+    localToRemoteBytes: number;
+    remoteToLocalBytes: number;
 };
 
 const defaultOptions: Partial<SSHConnectConfig> = {
@@ -59,10 +68,13 @@ export default class SSHConnection extends EventEmitter {
     private transportClosed = false;
     private pendingTunnels = new Map<string, Promise<ActiveTunnel>>();
     private closePromise: Promise<void> | undefined;
+    private readonly tunnelEventLogger: ((message: string, error?: Error) => void) | undefined;
 
     constructor(options: SSHConnectConfig) {
         super();
-        this.config = Object.assign({}, defaultOptions, options);
+        const { tunnelEventLogger, ...connectOptions } = options;
+        this.tunnelEventLogger = tunnelEventLogger;
+        this.config = Object.assign({}, defaultOptions, connectOptions);
         this.config.uniqueId = this.config.uniqueId || `${this.config.username}@${this.config.host}`;
     }
 
@@ -271,6 +283,32 @@ export default class SSHConnection extends EventEmitter {
     }
 
     /**
+     * Returns cumulative traffic for all local tunnel listeners, including
+     * sockets that have already closed. This lets the resolver distinguish a
+     * previously healthy protocol connection from a listener that accepted the
+     * editor but never received a single byte back from the remote endpoint.
+     */
+    getTunnelActivity(): TunnelActivity {
+        const total: TunnelActivity = {
+            acceptedConnections: 0,
+            localToRemoteBytes: 0,
+            remoteToLocalBytes: 0,
+        };
+
+        for (const tunnel of Object.values(this.activeTunnels)) {
+            total.acceptedConnections += tunnel.activity.acceptedConnections;
+            total.localToRemoteBytes += tunnel.activity.localToRemoteBytes;
+            total.remoteToLocalBytes += tunnel.activity.remoteToLocalBytes;
+            for (const socket of tunnel.connections) {
+                total.localToRemoteBytes += socket.bytesRead;
+                total.remoteToLocalBytes += socket.bytesWritten;
+            }
+        }
+
+        return total;
+    }
+
+    /**
      * Add new tunnel if not exist
      */
     addTunnel(SSHTunnelConfig: SSHTunnelConfig): Promise<ActiveTunnel> {
@@ -291,6 +329,11 @@ export default class SSHConnection extends EventEmitter {
 
         const tunnelPromise = new Promise<ActiveTunnel>((resolve, reject) => {
             const connections = new Set<net.Socket>();
+            const activity: TunnelActivity = {
+                acceptedConnections: 0,
+                localToRemoteBytes: 0,
+                remoteToLocalBytes: 0,
+            };
             const server = net.createServer()
                 .on('connection', (socket) => {
                     this.connectTunnelSocket(socket, SSHTunnelConfig);
@@ -298,8 +341,13 @@ export default class SSHConnection extends EventEmitter {
 
             SSHTunnelConfig.localPort = SSHTunnelConfig.localPort || 0;
             server.on('connection', (socket: net.Socket) => {
+                activity.acceptedConnections += 1;
                 connections.add(socket);
-                socket.once('close', () => connections.delete(socket));
+                socket.once('close', () => {
+                    activity.localToRemoteBytes += socket.bytesRead;
+                    activity.remoteToLocalBytes += socket.bytesWritten;
+                    connections.delete(socket);
+                });
             });
             server.on('listening', () => {
                 if (this.closed) {
@@ -311,7 +359,7 @@ export default class SSHConnection extends EventEmitter {
                     return;
                 }
                 SSHTunnelConfig.localPort = (server.address() as net.AddressInfo).port;
-                this.activeTunnels[SSHTunnelConfig.name!] = Object.assign({}, { server, connections }, SSHTunnelConfig);
+                this.activeTunnels[SSHTunnelConfig.name!] = Object.assign({}, { server, connections, activity }, SSHTunnelConfig);
                 this.emit(SSHConstants.CHANNEL.TUNNEL, SSHConstants.STATUS.CONNECT, { SSHTunnelConfig: SSHTunnelConfig });
                 resolve(this.activeTunnels[SSHTunnelConfig.name!]);
             }).on('error', (err: unknown) => {
@@ -342,6 +390,9 @@ export default class SSHConnection extends EventEmitter {
 
     private connectTunnelSocket(socket: net.Socket, config: SSHTunnelConfig): void {
         socket.setNoDelay(true);
+        const started = performance.now();
+        const tunnelName = config.name ?? `${config.remoteAddr}@${config.remotePort ?? config.remoteSocketPath}`;
+        this.tunnelEventLogger?.(`Tunnel socket accepted for ${tunnelName}`);
 
         let remoteStream: ClientChannel | undefined;
         const destroyRemote = () => {
@@ -350,13 +401,20 @@ export default class SSHConnection extends EventEmitter {
             }
         };
         const fail = (error: Error) => {
+            this.tunnelEventLogger?.(`Tunnel socket failed for ${tunnelName} after ${Math.round(performance.now() - started)}ms`, error);
             this.emit(SSHConstants.CHANNEL.TUNNEL, SSHConstants.STATUS.DISCONNECT, { SSHTunnelConfig: config, err: error });
             destroyRemote();
             socket.destroy();
         };
         // Install these before opening the SSH channel: a renderer can close or
         // reset its local socket while forwardOut is still in flight.
-        socket.once('close', destroyRemote);
+        socket.once('close', () => {
+            this.tunnelEventLogger?.(
+                `Tunnel socket closed for ${tunnelName} after ${Math.round(performance.now() - started)}ms `
+                + `(local->remote ${socket.bytesRead} bytes, remote->local ${socket.bytesWritten} bytes)`
+            );
+            destroyRemote();
+        });
         socket.once('error', fail);
 
         const connected = (error: Error | undefined, channel: ClientChannel) => {
@@ -369,6 +427,7 @@ export default class SSHConnection extends EventEmitter {
                 return;
             }
             remoteStream = channel;
+            this.tunnelEventLogger?.(`SSH forwarding established for ${tunnelName} in ${Math.round(performance.now() - started)}ms`);
 
             const destroyLocal = () => {
                 if (!socket.destroyed) {

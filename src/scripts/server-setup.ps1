@@ -16,9 +16,14 @@ $SERVER_DATA_DIR="%%SERVER_DATA_DIR%%"
 $SERVER_DATA_DIR_FLAG="%%SERVER_DATA_DIR_FLAG%%"
 $SERVER_DIR="$SERVER_DATA_DIR\bin\$DISTRO_COMMIT"
 $SERVER_SCRIPT="$SERVER_DIR\bin\$SERVER_APP_NAME.cmd"
-$SERVER_LOGFILE="$SERVER_DATA_DIR\.$DISTRO_COMMIT.log"
-$SERVER_PIDFILE="$SERVER_DATA_DIR\.$DISTRO_COMMIT.pid"
-$SERVER_TOKENFILE="$SERVER_DATA_DIR\.$DISTRO_COMMIT.token"
+$SERVER_METADATA_PREFIX="$SERVER_DATA_DIR\.$DISTRO_COMMIT"
+$SERVER_ACTIVEFILE="$SERVER_METADATA_PREFIX.active"
+$SERVER_GENERATION=$null
+$SERVER_LOGFILE="$SERVER_METADATA_PREFIX.log"
+$SERVER_PIDFILE="$SERVER_METADATA_PREFIX.pid"
+$SERVER_TOKENFILE="$SERVER_METADATA_PREFIX.token"
+$SERVER_GENERATION_ID="%%SCRIPT_ID%%"
+$REPLACE_SERVER_ENDPOINT=%%REPLACE_SERVER_ENDPOINT%%
 $SERVER_ARCH=$null
 $SERVER_CONNECTION_TOKEN=$null
 $SERVER_DOWNLOAD_URL="%%SERVER_DOWNLOAD_URL%%"
@@ -28,6 +33,32 @@ $LISTENING_ON=$null
 $OS_RELEASE_ID=$null
 $ARCH=$null
 $PLATFORM="win32"
+$ROTATED_SERVER=$false
+$MANAGEMENT_CONNECTION_COUNT=0
+
+function Select-ServerMetadata {
+  $script:SERVER_GENERATION=$null
+  if(Test-Path $SERVER_ACTIVEFILE) {
+    $candidate=(Get-Content -Raw $SERVER_ACTIVEFILE -ErrorAction SilentlyContinue).Trim()
+    if($candidate -match '^[a-f0-9]+$') {
+      $script:SERVER_GENERATION=$candidate
+    }
+  }
+
+  $suffix=if($SERVER_GENERATION) { ".$SERVER_GENERATION" } else { "" }
+  $script:SERVER_LOGFILE="$SERVER_METADATA_PREFIX$suffix.log"
+  $script:SERVER_PIDFILE="$SERVER_METADATA_PREFIX$suffix.pid"
+  $script:SERVER_TOKENFILE="$SERVER_METADATA_PREFIX$suffix.token"
+}
+
+function Select-NewServerGeneration {
+  $script:SERVER_GENERATION=$SERVER_GENERATION_ID
+  $suffix=".$SERVER_GENERATION"
+  $script:SERVER_LOGFILE="$SERVER_METADATA_PREFIX$suffix.log"
+  $script:SERVER_PIDFILE="$SERVER_METADATA_PREFIX$suffix.pid"
+  $script:SERVER_TOKENFILE="$SERVER_METADATA_PREFIX$suffix.token"
+  $script:ROTATED_SERVER=$true
+}
 
 function printInstallResults($code) {
   "%%SCRIPT_ID%%: start"
@@ -39,6 +70,7 @@ function printInstallResults($code) {
   "arch==$ARCH=="
   "platform==$PLATFORM=="
   "tmpDir==$TMP_DIR=="
+  "managementConnectionCount==$MANAGEMENT_CONNECTION_COUNT=="
 %%ENV_VAR_LINES%%
   "%%SCRIPT_ID%%: end"
 }
@@ -66,6 +98,8 @@ try {
     printInstallResults 1
     exit 0
   }
+
+Select-ServerMetadata
 
 # Check machine architecture
 $ARCH=$env:PROCESSOR_ARCHITECTURE
@@ -144,8 +178,40 @@ if(%%MODIFY_PRODUCT_JSON%%) {
   Set-Content -NoNewLine "$SERVER_DIR\product.json"
 }
 
-# Try to find if server is already running
-$SERVER_RUNNING_PROCESS=Get-Process node -ErrorAction SilentlyContinue | Where-Object Path -Like "$SERVER_DIR\*"
+# Try to find if the active server generation is already running. Restrict the
+# compatibility process scan to legacy installations: after generation
+# tracking is active, another node process can be an older Agent that is still
+# intentionally serving a different VSCodium window.
+$SERVER_RUNNING_PROCESS=$null
+if(Test-Path $SERVER_PIDFILE) {
+  $SERVER_PID=(Get-Content -Raw $SERVER_PIDFILE -ErrorAction SilentlyContinue).Trim()
+  if($SERVER_PID -match '^\d+$') {
+    $SERVER_RUNNING_PROCESS=Get-Process -Id $SERVER_PID -ErrorAction SilentlyContinue
+  }
+}
+elseif(!(Test-Path $SERVER_ACTIVEFILE)) {
+  $SERVER_RUNNING_PROCESS=Get-Process node -ErrorAction SilentlyContinue | Where-Object Path -Like "$SERVER_DIR\*"
+}
+
+$CURRENT_LISTENING_ON=$null
+if(Test-Path $SERVER_LOGFILE) {
+  $CURRENT_MATCH=Select-String -Path $SERVER_LOGFILE -Pattern 'Extension host agent listening on (.+)' -AllMatches -ErrorAction SilentlyContinue | Select-Object -Last 1
+  if($CURRENT_MATCH) {
+    $CURRENT_LISTENING_ON=$CURRENT_MATCH.Matches[0].Groups[1].Value
+  }
+}
+
+if($REPLACE_SERVER_ENDPOINT) {
+  if(!$CURRENT_LISTENING_ON -or $CURRENT_LISTENING_ON -eq $REPLACE_SERVER_ENDPOINT) {
+    "Rotating unhealthy server endpoint $REPLACE_SERVER_ENDPOINT to a new generation"
+    Select-NewServerGeneration
+    $SERVER_RUNNING_PROCESS=$null
+  }
+  else {
+    "Another resolver already replaced server endpoint $REPLACE_SERVER_ENDPOINT with $CURRENT_LISTENING_ON"
+  }
+}
+
 if($SERVER_RUNNING_PROCESS) {
   echo "Server script is already running $SERVER_SCRIPT"
 
@@ -260,6 +326,22 @@ if(!$LISTENING_ON) {
   printInstallResults 1
   exit 0
 }
+
+if($ROTATED_SERVER) {
+  $SERVER_ACTIVEFILE_TMP="$SERVER_ACTIVEFILE.$SERVER_GENERATION.tmp"
+  try {
+    [System.IO.File]::WriteAllText($SERVER_ACTIVEFILE_TMP, "$SERVER_GENERATION`n")
+    Move-Item -Force $SERVER_ACTIVEFILE_TMP $SERVER_ACTIVEFILE
+  }
+  catch {
+    Remove-Item -Force $SERVER_ACTIVEFILE_TMP -ErrorAction SilentlyContinue
+    "Error could not activate replacement server generation"
+    printInstallResults 1
+    exit 0
+  }
+}
+
+$MANAGEMENT_CONNECTION_COUNT=(Select-String -Path $SERVER_LOGFILE -SimpleMatch '[ManagementConnection] New connection established.' -ErrorAction SilentlyContinue).Count
 
 # Finish server setup
 printInstallResults 0

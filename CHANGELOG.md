@@ -1,3 +1,12 @@
+## 0.4.1
+
+- Detect resolver retries where the editor reached the SSH tunnel but the Remote Agent never established a management connection.
+- Rotate an unresponsive Agent to an isolated generation instead of repeatedly reusing the same PID, token, log, and port.
+- Preserve older Agent generations so active VSCodium windows and integrated terminals are not interrupted during recovery.
+- Serialize concurrent recovery attempts so multiple windows select the same replacement generation.
+- Add per-tunnel forwarding, lifetime, and byte-count diagnostics for handshake failures.
+- Cover generation rotation, concurrent retries, Bash, Fish, no-flock Linux, Alpine, and agent forwarding with regression tests.
+
 ## 0.4.0
 
 - Add cross-window remote server endpoint and token caching with bounded health probes.
