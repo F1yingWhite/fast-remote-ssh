@@ -110,3 +110,27 @@ export async function openSSHConfigFile() {
     }
     vscode.commands.executeCommand('vscode.open', vscode.Uri.file(sshConfigPath));
 }
+
+/**
+ * Guides the user through enabling the 'contribViewsRemote' API proposal, which
+ * extensions cannot enable by themselves: it is a per-machine editor setting
+ * (argv.json) validated by the client before the extension host even starts.
+ */
+export async function enableNativeRemoteView(extensionId: string) {
+    const commands = await vscode.commands.getCommands();
+    if (commands.includes('sshHosts.focus')) {
+        void vscode.window.showInformationMessage('Fast Remote SSH: SSH Targets is already shown inside the built-in Remote view.');
+        return;
+    }
+
+    const choice = await vscode.window.showInformationMessage(
+        'SSH Targets currently lives in its own sidebar view. Showing it inside the built-in Remote view requires the client to grant this extension the "contribViewsRemote" API proposal, which can only be done in argv.json.',
+        'Copy Snippet and Open argv.json'
+    );
+    if (!choice) {
+        return;
+    }
+
+    await vscode.env.clipboard.writeText(`"enable-proposed-api": [\n\t"${extensionId}"\n]`);
+    await vscode.commands.executeCommand('workbench.action.configureRuntimeArguments');
+}

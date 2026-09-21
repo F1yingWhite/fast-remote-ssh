@@ -1,3 +1,10 @@
+## 0.5.0
+
+- Add a fallback SSH Targets view in the extension's own activity bar container for clients that do not grant the `contribViewsRemote` API proposal (e.g. VSCodium builds whose allowlist does not include the extension), eliminating the "No view is registered with id: sshHosts" error.
+- Detect at activation whether the built-in Remote view is available and automatically show exactly one SSH Targets view.
+- Add the `Remote-SSH: Enable Built-in Remote View Integration` command, which copies the required `argv.json` snippet to the clipboard and opens the file for editing.
+- Surface a clear error with a shortcut to the runtime arguments settings when the `resolvers` API proposal is unavailable, instead of failing silently.
+
 ## 0.4.1
 
 - Detect resolver retries where the editor reached the SSH tunnel but the Remote Agent never established a management connection.

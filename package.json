@@ -2,7 +2,7 @@
 	"name": "fast-remote-ssh",
 	"displayName": "Fast Remote - SSH",
 	"description": "A performance- and reliability-focused Open Remote SSH distribution for VSCodium and Code OSS.",
-	"version": "0.4.1",
+	"version": "0.5.0",
 	"author": {
 		"name": "F1yingWhite",
 		"url": "https://github.com/F1yingWhite"
@@ -72,8 +72,8 @@
 		"@types/webpack": "5.28.5",
 		"@typescript-eslint/eslint-plugin": "8.65.0",
 		"@typescript-eslint/parser": "8.65.0",
-		"@vitest/coverage-v8": "4.1.10",
-		"@vitest/ui": "4.1.10",
+		"@vitest/coverage-v8": "4.1.11",
+		"@vitest/ui": "4.1.11",
 		"@vscode/vsce": "3.9.2",
 		"@zokugun/fs-extra-plus": "0.5.0",
 		"@zokugun/xtry": "0.11.6",
@@ -91,7 +91,7 @@
 		"typescript": "5.9.3",
 		"typescript-eslint": "8.65.0",
 		"universalify": "2.0.1",
-		"vitest": "4.1.10",
+		"vitest": "4.1.11",
 		"webpack": "5.109.0",
 		"webpack-cli": "7.2.1",
 		"yaml": "2.9.0"
@@ -101,7 +101,10 @@
 		"onCommand:openremotessh.openEmptyWindowInCurrentWindow",
 		"onCommand:openremotessh.openConfigFile",
 		"onCommand:openremotessh.showLog",
+		"onCommand:openremotessh.enableNativeView",
 		"onResolveRemoteAuthority:ssh-remote",
+		"onStartupFinished",
+		"onView:fastRemoteSsh.hosts",
 		"onView:sshHosts"
 	],
 	"contributes": {
@@ -214,13 +217,30 @@
 				}
 			}
 		},
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "fastRemoteSsh",
+					"title": "Fast Remote SSH",
+					"icon": "resources/fast-remote-ssh.svg"
+				}
+			]
+		},
 		"views": {
 			"remote": [
 				{
 					"id": "sshHosts",
 					"name": "SSH Targets",
 					"group": "targets@1",
-					"remoteName": "ssh-remote"
+					"remoteName": "ssh-remote",
+					"when": "!fastRemoteSsh.useFallbackView"
+				}
+			],
+			"fastRemoteSsh": [
+				{
+					"id": "fastRemoteSsh.hosts",
+					"name": "SSH Targets",
+					"when": "fastRemoteSsh.useFallbackView"
 				}
 			]
 		},
@@ -243,6 +263,11 @@
 			{
 				"command": "openremotessh.showLog",
 				"title": "Show Log",
+				"category": "Remote-SSH"
+			},
+			{
+				"command": "openremotessh.enableNativeView",
+				"title": "Enable Built-in Remote View Integration",
 				"category": "Remote-SSH"
 			},
 			{
@@ -386,18 +411,22 @@
 			"view/title": [
 				{
 					"command": "openremotessh.explorer.add",
-					"when": "view == sshHosts",
+					"when": "view == sshHosts || view == fastRemoteSsh.hosts",
 					"group": "navigation"
 				},
 				{
 					"command": "openremotessh.explorer.configure",
-					"when": "view == sshHosts",
+					"when": "view == sshHosts || view == fastRemoteSsh.hosts",
 					"group": "navigation"
 				},
 				{
 					"command": "openremotessh.explorer.refresh",
-					"when": "view == sshHosts",
+					"when": "view == sshHosts || view == fastRemoteSsh.hosts",
 					"group": "navigation"
+				},
+				{
+					"command": "openremotessh.enableNativeView",
+					"when": "view == fastRemoteSsh.hosts"
 				}
 			],
 			"view/item/context": [

@@ -88,10 +88,19 @@ Your SSH server's configuration needs to have the following setting:
 
 **Activation**
 
-Most current VSCodium builds activate the required API proposals automatically. If the
-Remote view is unavailable or the extension log says that `resolvers` or
-`contribViewsRemote` cannot be used, enable this extension explicitly in `argv.json`.
-Restart VSCodium after changing the file.
+This extension relies on two API proposals: `resolvers` (required for SSH connections) and
+`contribViewsRemote` (required to show the SSH Targets view inside the built-in Remote view).
+Proposals are only granted to extensions that the client allowlists in its `product.json`
+(`extensionEnabledApiProposals`), so out of the box this depends on the goodwill of your editor
+distribution:
+
+- **Code OSS** (running from source): proposals are always granted, everything works.
+- **VSCodium**: only extensions listed in its built-in `product.json` get proposals
+  automatically. If this extension is not on that list, the Remote view integration is
+  unavailable and the extension shows its SSH Targets view in its own activity bar entry
+  instead; SSH connections keep working on current VSCodium builds, but that behavior is not
+  guaranteed. For full functionality enable this extension explicitly in `argv.json`.
+  Restart VSCodium after changing the file.
 
 ```json
 {
@@ -106,6 +115,9 @@ Restart VSCodium after changing the file.
 
 Open the file with the `Preferences: Configure Runtime Arguments` command. It is usually
 located at `~/.vscode-oss/argv.json`.
+
+The `Remote-SSH: Enable Built-in Remote View Integration` command (also in the fallback
+view's `...` menu) copies the required snippet to the clipboard and opens `argv.json` for you.
 
 **Alpine linux**
 
